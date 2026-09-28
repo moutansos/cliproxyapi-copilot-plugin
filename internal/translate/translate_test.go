@@ -237,3 +237,16 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
 		}
 	}
 }
+
+func TestResponsesRequestTranslatesToMessagesEndpoint(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"claude-opus-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"max_output_tokens":64}`)
+	out, err := RequestForEndpointFrom("openai-response", "claude-opus-5.5", body, false, EndpointMessages)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	if !gjson.GetBytes(out, "messages").IsArray() || !strings.Contains(string(out), "hello") {
+		t.Fatalf("translated request is not an Anthropic messages payload: %s", out)
+	}
+}

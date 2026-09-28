@@ -183,12 +183,24 @@ func (s *Service) endpointForModel(ctx context.Context, callbackID, authID strin
 	return "", token, statusError("model_not_found", "Copilot model is not present in the authenticated model catalog", http.StatusNotFound)
 }
 
+func anthropicModel(model upstreamModel) bool {
+	return strings.EqualFold(strings.TrimSpace(model.Vendor), "Anthropic") ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.ID)), "claude-")
+}
+
 func selectEndpoint(model upstreamModel) (string, error) {
 	if endpoint, ok := specialResponsesModel(model.ID); ok {
 		return endpoint, nil
 	}
 	endpoints := normalizeEndpoints(model.SupportedEndpoints)
-	for _, preferred := range []string{translate.EndpointResponses, translate.EndpointChatCompletions, translate.EndpointMessages} {
+	preferences := []string{translate.EndpointResponses, translate.EndpointChatCompletions, translate.EndpointMessages}
+	if anthropicModel(model) {
+		// Copilot's Anthropic-native endpoint keeps extended thinking, cache_control
+		// prompt caching and Claude tool blocks; the OpenAI-shaped endpoints drop
+		// thinking and reject reasoning parameters for Claude models.
+		preferences = []string{translate.EndpointMessages, translate.EndpointResponses, translate.EndpointChatCompletions}
+	}
+	for _, preferred := range preferences {
 		for _, endpoint := range endpoints {
 			if endpoint == preferred {
 				return preferred, nil
