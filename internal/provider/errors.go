@@ -31,10 +31,19 @@ func upstreamStatusError(status int, detail string) error {
 	if detail != "" {
 		message += ": " + detail
 	}
+	code := "upstream_error"
+	hostStatus := status
+	if status == http.StatusPaymentRequired {
+		// GitHub answers 402 when the account's AI credit allowance is exhausted.
+		// Report it to the host as 429 so the scheduler applies its quota cooldown
+		// to this credential instead of a short payment-required model pause.
+		code = "quota_exhausted"
+		hostStatus = http.StatusTooManyRequests
+	}
 	return &StatusError{
-		Code:       "upstream_error",
+		Code:       code,
 		Message:    message,
-		HTTPStatus: status,
-		Retryable:  status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500,
+		HTTPStatus: hostStatus,
+		Retryable:  hostStatus == http.StatusRequestTimeout || hostStatus == http.StatusTooManyRequests || hostStatus >= 500,
 	}
 }
