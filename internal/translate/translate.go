@@ -32,6 +32,13 @@ func RequestForEndpoint(model string, body []byte, stream bool, endpoint string)
 
 func RequestForEndpointFrom(source, model string, body []byte, stream bool, endpoint string) ([]byte, error) {
 	from := sdktranslator.FromString(source)
+	if from == sdktranslator.FormatOpenAIResponse {
+		normalized, errNormalize := normalizeResponsesInput(body)
+		if errNormalize != nil {
+			return nil, errNormalize
+		}
+		body = normalized
+	}
 	to, err := endpointFormat(endpoint)
 	if err != nil {
 		return nil, err
@@ -185,6 +192,15 @@ func response(ctx context.Context, from, to sdktranslator.Format, model string, 
 		}
 		return out, nil
 	}
+	if from == sdktranslator.FormatClaude && to != sdktranslator.FormatClaude {
+		// The official Claude -> X non-stream converters read Claude SSE "data:" lines, so a
+		// Claude JSON answer is rendered as its equivalent event stream first.
+		events, errEvents := claudeMessageToSSE(body)
+		if errEvents != nil {
+			return nil, errEvents
+		}
+		body = events
+	}
 	out := registry.TranslateNonStream(ctx, from, to, model, original, translated, body, nil)
 	if len(out) == 0 || !json.Valid(out) {
 		return nil, fmt.Errorf("official response translation from %s to %s failed", from, to)
@@ -238,6 +254,13 @@ func stream(ctx context.Context, from, to sdktranslator.Format, model string, or
 		var out [][]byte
 		for _, firstFrame := range first {
 			out = append(out, registry.TranslateStream(ctx, intermediate, to, model, original, intermediateRequest, firstFrame, &hopState.Second)...)
+		}
+		return out, nil
+	}
+	if from == sdktranslator.FormatClaude && to != sdktranslator.FormatClaude {
+		var out [][]byte
+		for _, dataLine := range sseDataLines(frame) {
+			out = append(out, registry.TranslateStream(ctx, from, to, model, original, translated, dataLine, state)...)
 		}
 		return out, nil
 	}

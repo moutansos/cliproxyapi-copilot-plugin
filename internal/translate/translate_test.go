@@ -418,3 +418,71 @@ func TestResponsesToChatRefusalAndIncompleteReasons(t *testing.T) {
 		t.Fatalf("filtered finish_reason = %q, want content_filter", reason)
 	}
 }
+
+func TestResponsesStringInputReachesClaude(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"claude-haiku-4.5","input":"Reply with ok.","max_output_tokens":64}`)
+	out, err := RequestForEndpointFrom("openai-response", "claude-haiku-4.5", body, false, EndpointMessages)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	if gjson.GetBytes(out, "messages.#").Int() != 1 || !strings.Contains(gjson.GetBytes(out, "messages.0").Raw, "Reply with ok.") {
+		t.Fatalf("string input was dropped: %s", out)
+	}
+}
+
+func TestClaudeJSONAnswerTranslatesToResponsesAndChat(t *testing.T) {
+	t.Parallel()
+
+	claude := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":2}}`)
+	original := []byte(`{"model":"claude-haiku-4.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	translated, err := RequestForEndpointFrom("openai-response", "claude-haiku-4.5", original, false, EndpointMessages)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	got, err := ResponseFromEndpoint(context.Background(), EndpointMessages, "openai-response", "claude-haiku-4.5", original, translated, claude)
+	if err != nil {
+		t.Fatalf("ResponseFromEndpoint() error = %v", err)
+	}
+	if !strings.Contains(string(got), `"ok"`) {
+		t.Fatalf("Responses answer is empty: %s", got)
+	}
+	chatOriginal := []byte(`{"model":"claude-haiku-4.5","messages":[{"role":"user","content":"hi"}]}`)
+	chatTranslated, _ := RequestForEndpointFrom("openai", "claude-haiku-4.5", chatOriginal, false, EndpointMessages)
+	chat, err := ResponseFromEndpoint(context.Background(), EndpointMessages, "openai", "claude-haiku-4.5", chatOriginal, chatTranslated, claude)
+	if err != nil || gjson.GetBytes(chat, "choices.0.message.content").String() != "ok" {
+		t.Fatalf("chat answer from a Claude JSON body is empty: %s, %v", chat, err)
+	}
+}
+
+func TestClaudeSSEFramesTranslateToResponsesStream(t *testing.T) {
+	t.Parallel()
+
+	original := []byte(`{"model":"claude-haiku-4.5","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	translated, err := RequestForEndpointFrom("openai-response", "claude-haiku-4.5", original, true, EndpointMessages)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	events, err := claudeMessageToSSE([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":2}}`))
+	if err != nil {
+		t.Fatalf("claudeMessageToSSE() error = %v", err)
+	}
+	var state any
+	var joined strings.Builder
+	for _, frame := range strings.SplitAfter(string(events), "\n\n") {
+		if strings.TrimSpace(frame) == "" {
+			continue
+		}
+		out, errStream := StreamFromEndpoint(context.Background(), EndpointMessages, "openai-response", "claude-haiku-4.5", original, translated, []byte(frame), &state)
+		if errStream != nil {
+			t.Fatalf("StreamFromEndpoint() error = %v", errStream)
+		}
+		for _, chunk := range out {
+			joined.Write(chunk)
+		}
+	}
+	if !strings.Contains(joined.String(), "response.output_text.delta") || !strings.Contains(joined.String(), `"ok"`) {
+		t.Fatalf("Responses stream lacks the text delta: %s", joined.String())
+	}
+}
