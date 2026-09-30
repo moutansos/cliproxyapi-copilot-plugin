@@ -104,10 +104,21 @@ func StreamFromEndpoint(ctx context.Context, endpoint, destination, model string
 		return nil, err
 	}
 	to := sdktranslator.FromString(destination)
+	var out [][]byte
 	if from == to {
-		return [][]byte{append([]byte(nil), frame...)}, nil
+		out = [][]byte{append([]byte(nil), frame...)}
+	} else {
+		out, err = stream(ctx, from, to, model, original, translated, frame, state)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return stream(ctx, from, to, model, original, translated, frame, state)
+	if to == sdktranslator.FormatOpenAI {
+		// The host's chat-completions handler writes "data: <chunk>\n\n" around every chunk and
+		// sends its own [DONE], so chat output must be bare JSON payloads.
+		return chatStreamPayloads(out), nil
+	}
+	return out, nil
 }
 
 func ResponsesSSEToClaude(ctx context.Context, model string, original, translated, frame []byte, state *any) ([][]byte, error) {

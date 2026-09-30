@@ -30,6 +30,7 @@ func responsesResponseToChat(model string, body []byte) ([]byte, error) {
 		return nil, errFailure
 	}
 	var text strings.Builder
+	var refusal strings.Builder
 	var reasoning strings.Builder
 	toolCalls := make([]map[string]any, 0)
 	for _, rawItem := range arrayValue(root["output"]) {
@@ -38,8 +39,11 @@ func responsesResponseToChat(model string, body []byte) ([]byte, error) {
 		case "message":
 			for _, rawPart := range arrayValue(item["content"]) {
 				part := objectValue(rawPart)
-				if kind := stringValue(part["type"]); kind == "output_text" || kind == "text" {
+				switch stringValue(part["type"]) {
+				case "output_text", "text":
 					text.WriteString(rawStringValue(part["text"]))
+				case "refusal":
+					refusal.WriteString(rawStringValue(part["refusal"]))
 				}
 			}
 		case "reasoning":
@@ -57,16 +61,16 @@ func responsesResponseToChat(model string, body []byte) ([]byte, error) {
 		}
 	}
 	message := map[string]any{"role": "assistant", "content": text.String()}
+	if refusal.Len() > 0 {
+		message["refusal"] = refusal.String()
+	}
 	if reasoning.Len() > 0 {
 		message["reasoning_content"] = reasoning.String()
 	}
-	finish := "stop"
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
-		finish = "tool_calls"
-	} else if stringValue(root["status"]) == "incomplete" {
-		finish = "length"
 	}
+	finish := chatFinishReason(root, len(toolCalls) > 0)
 	usage := objectValue(root["usage"])
 	prompt := int64Value(usage["input_tokens"])
 	completion := int64Value(usage["output_tokens"])
@@ -103,4 +107,47 @@ func firstPositive(values ...int64) int64 {
 		}
 	}
 	return 0
+}
+
+// chatFinishReason maps a Responses status to a chat finish_reason. An incomplete response
+// wins over a tool call, because its tool arguments or text may be truncated.
+func chatFinishReason(root map[string]any, hasToolCalls bool) string {
+	if stringValue(root["status"]) == "incomplete" {
+		if stringValue(objectValue(root["incomplete_details"])["reason"]) == "content_filter" {
+			return "content_filter"
+		}
+		return "length"
+	}
+	if hasToolCalls {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
+// chatStreamPayloads turns stream output into bare chat-completion chunk payloads: SSE data
+// lines are unwrapped, and [DONE], empty and comment (keepalive) lines are dropped.
+func chatStreamPayloads(chunks [][]byte) [][]byte {
+	out := make([][]byte, 0, len(chunks))
+	for _, chunk := range chunks {
+		trimmed := bytes.TrimSpace(chunk)
+		if len(trimmed) == 0 {
+			continue
+		}
+		if trimmed[0] == '{' {
+			out = append(out, trimmed)
+			continue
+		}
+		for _, line := range bytes.Split(trimmed, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				continue
+			}
+			out = append(out, append([]byte(nil), payload...))
+		}
+	}
+	return out
 }

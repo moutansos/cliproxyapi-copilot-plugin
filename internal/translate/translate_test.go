@@ -345,6 +345,9 @@ func TestResponsesSSEToOpenAIChatStream(t *testing.T) {
 	if !strings.Contains(joined.String(), `"content":"ok"`) {
 		t.Fatalf("chat stream did not carry the text delta: %s", joined.String())
 	}
+	if strings.Contains(joined.String(), "data:") {
+		t.Fatalf("chat stream chunks must be bare JSON for the host to frame: %s", joined.String())
+	}
 }
 
 func TestResponsesToChatCarriesToolCallsAndUsage(t *testing.T) {
@@ -363,5 +366,55 @@ func TestResponsesToChatCarriesToolCallsAndUsage(t *testing.T) {
 	if gjson.GetBytes(got, "usage.prompt_tokens").Int() != 9 || gjson.GetBytes(got, "usage.completion_tokens").Int() != 3 ||
 		gjson.GetBytes(got, "usage.prompt_tokens_details.cached_tokens").Int() != 4 {
 		t.Fatalf("usage not carried: %s", got)
+	}
+}
+
+func TestNativeChatStreamEmitsBareJSONPayloads(t *testing.T) {
+	t.Parallel()
+
+	var state any
+	chunk := `{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}`
+	cases := map[string][]byte{
+		"data frame": []byte("data: " + chunk + "\n\n"),
+		"done":       []byte("data: [DONE]\n\n"),
+		"keepalive":  []byte(": ping\n\n"),
+	}
+	want := map[string]int{"data frame": 1, "done": 0, "keepalive": 0}
+	for name, frame := range cases {
+		out, err := StreamFromEndpoint(context.Background(), EndpointChatCompletions, "openai", "gpt-5-mini", nil, nil, frame, &state)
+		if err != nil {
+			t.Fatalf("%s: StreamFromEndpoint() error = %v", name, err)
+		}
+		if len(out) != want[name] {
+			t.Fatalf("%s: got %d chunks %q, want %d", name, len(out), out, want[name])
+		}
+		if len(out) == 1 && string(out[0]) != chunk {
+			t.Fatalf("%s: chunk = %s, want bare JSON %s", name, out[0], chunk)
+		}
+	}
+	claudeFrame := []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	out, err := StreamFromEndpoint(context.Background(), EndpointMessages, "claude", "claude-haiku-4.5", nil, nil, claudeFrame, &state)
+	if err != nil || len(out) != 1 || string(out[0]) != string(claudeFrame) {
+		t.Fatalf("claude passthrough must keep full SSE frames: %q, %v", out, err)
+	}
+}
+
+func TestResponsesToChatRefusalAndIncompleteReasons(t *testing.T) {
+	t.Parallel()
+
+	refusal := []byte(`{"id":"r1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I cannot assist with that."}]}]}`)
+	got, err := ResponseFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", nil, nil, refusal)
+	if err != nil || gjson.GetBytes(got, "choices.0.message.refusal").String() != "I cannot assist with that." {
+		t.Fatalf("refusal lost: %s, %v", got, err)
+	}
+	truncatedTool := []byte(`{"id":"r2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{\"a\":"}]}`)
+	got, _ = ResponseFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", nil, nil, truncatedTool)
+	if reason := gjson.GetBytes(got, "choices.0.finish_reason").String(); reason != "length" {
+		t.Fatalf("truncated tool call finish_reason = %q, want length", reason)
+	}
+	filtered := []byte(`{"id":"r3","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}`)
+	got, _ = ResponseFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", nil, nil, filtered)
+	if reason := gjson.GetBytes(got, "choices.0.finish_reason").String(); reason != "content_filter" {
+		t.Fatalf("filtered finish_reason = %q, want content_filter", reason)
 	}
 }
