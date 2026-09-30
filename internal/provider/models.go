@@ -158,7 +158,7 @@ func (s *Service) models(ctx context.Context, callbackID, authID string, storage
 	return cleaned, token, nil
 }
 
-func (s *Service) endpointForModel(ctx context.Context, callbackID, authID string, storage authStorage, modelID string) (string, copilotTokenEntry, error) {
+func (s *Service) endpointForModel(ctx context.Context, callbackID, authID string, storage authStorage, modelID, sourceFormat string) (string, copilotTokenEntry, error) {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return "", copilotTokenEntry{}, statusError("invalid_request", "model is required", http.StatusBadRequest)
@@ -173,7 +173,7 @@ func (s *Service) endpointForModel(ctx context.Context, callbackID, authID strin
 	}
 	for _, model := range models {
 		if strings.EqualFold(model.ID, modelID) {
-			endpoint, errEndpoint := selectEndpoint(model)
+			endpoint, errEndpoint := selectEndpointFor(model, sourceFormat)
 			return endpoint, token, errEndpoint
 		}
 	}
@@ -188,13 +188,23 @@ func anthropicModel(model upstreamModel) bool {
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.ID)), "claude-")
 }
 
+// selectEndpoint picks the upstream endpoint for a model without regard to the client format.
 func selectEndpoint(model upstreamModel) (string, error) {
+	return selectEndpointFor(model, "")
+}
+
+// selectEndpointFor picks the upstream endpoint for a model and client format. An OpenAI chat
+// client is sent to Copilot's /chat/completions when the model offers it, so the request and
+// the response pass through untranslated in both directions.
+func selectEndpointFor(model upstreamModel, sourceFormat string) (string, error) {
 	if endpoint, ok := specialResponsesModel(model.ID); ok {
 		return endpoint, nil
 	}
 	endpoints := normalizeEndpoints(model.SupportedEndpoints)
 	preferences := []string{translate.EndpointResponses, translate.EndpointChatCompletions, translate.EndpointMessages}
-	if anthropicModel(model) {
+	if sourceFormat == "openai" {
+		preferences = []string{translate.EndpointChatCompletions, translate.EndpointResponses, translate.EndpointMessages}
+	} else if anthropicModel(model) {
 		// Copilot's Anthropic-native endpoint keeps extended thinking, cache_control
 		// prompt caching and Claude tool blocks; the OpenAI-shaped endpoints drop
 		// thinking and reject reasoning parameters for Claude models.

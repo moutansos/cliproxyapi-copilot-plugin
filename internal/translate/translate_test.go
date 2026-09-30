@@ -250,3 +250,118 @@ func TestResponsesRequestTranslatesToMessagesEndpoint(t *testing.T) {
 		t.Fatalf("translated request is not an Anthropic messages payload: %s", out)
 	}
 }
+
+func TestOpenAIChatPassesThroughToChatEndpoint(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"copilot/gpt-5-mini","messages":[{"role":"user","content":"hello"}],"max_tokens":10}`)
+	out, err := RequestForEndpointFrom("openai", "gpt-5-mini", body, true, EndpointChatCompletions)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	if gjson.GetBytes(out, "model").String() != "gpt-5-mini" || !gjson.GetBytes(out, "stream").Bool() {
+		t.Fatalf("model/stream not set: %s", out)
+	}
+	if gjson.GetBytes(out, "messages.0.content").String() != "hello" || gjson.GetBytes(out, "max_tokens").Int() != 10 {
+		t.Fatalf("chat body changed on passthrough: %s", out)
+	}
+	response := []byte(`{"id":"c1","object":"chat.completion","model":"gpt-5-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`)
+	got, errResponse := ResponseFromEndpoint(context.Background(), EndpointChatCompletions, "openai", "gpt-5-mini", body, out, response)
+	if errResponse != nil || gjson.GetBytes(got, "choices.0.message.content").String() != "ok" {
+		t.Fatalf("chat response passthrough = %s, %v", got, errResponse)
+	}
+}
+
+func TestOpenAIChatToResponsesEndpointRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"hello"}],"max_tokens":400}`)
+	out, err := RequestForEndpointFrom("openai", "gpt-5.6-sol", body, false, EndpointResponses)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	if !strings.Contains(string(out), "hello") {
+		t.Fatalf("translated Responses request lost the prompt: %s", out)
+	}
+	response := []byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}`)
+	got, errResponse := ResponseFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", body, out, response)
+	if errResponse != nil {
+		t.Fatalf("ResponseFromEndpoint() error = %v", errResponse)
+	}
+	if gjson.GetBytes(got, "choices.0.message.content").String() != "ok" {
+		t.Fatalf("chat response is empty after translating from Responses: %s", got)
+	}
+}
+
+func TestResponsesOutputTokensClampedToCopilotMinimum(t *testing.T) {
+	t.Parallel()
+
+	small := []byte(`{"model":"gpt-5.6-sol","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := RequestForEndpointFrom("claude", "gpt-5.6-sol", small, false, EndpointResponses)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 16 {
+		t.Fatalf("max_output_tokens = %d, want clamped to 16: %s", got, out)
+	}
+	large := []byte(`{"model":"gpt-5.6-sol","max_tokens":400,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err = RequestForEndpointFrom("claude", "gpt-5.6-sol", large, false, EndpointResponses)
+	if err != nil || gjson.GetBytes(out, "max_output_tokens").Int() != 400 {
+		t.Fatalf("a larger limit must be kept: %s, %v", out, err)
+	}
+	chat := []byte(`{"model":"gpt-5-mini","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err = RequestForEndpointFrom("openai", "gpt-5-mini", chat, false, EndpointChatCompletions)
+	if err != nil || gjson.GetBytes(out, "max_tokens").Int() != 5 {
+		t.Fatalf("the chat endpoint must not be clamped: %s, %v", out, err)
+	}
+}
+
+func TestResponsesSSEToOpenAIChatStream(t *testing.T) {
+	t.Parallel()
+
+	original := []byte(`{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	translated, err := RequestForEndpointFrom("openai", "gpt-5.6-sol", original, true, EndpointResponses)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	frames := []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-sol\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+		"event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n",
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-sol\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"total_tokens\":6}}}\n\n",
+	}
+	var state any
+	var joined strings.Builder
+	for _, frame := range frames {
+		out, errStream := StreamFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", original, translated, []byte(frame), &state)
+		if errStream != nil {
+			t.Fatalf("StreamFromEndpoint() error = %v", errStream)
+		}
+		for _, chunk := range out {
+			joined.Write(chunk)
+		}
+	}
+	if !strings.Contains(joined.String(), `"content":"ok"`) {
+		t.Fatalf("chat stream did not carry the text delta: %s", joined.String())
+	}
+}
+
+func TestResponsesToChatCarriesToolCallsAndUsage(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"id":"resp_2","created_at":1700000000,"model":"gpt-5.6-sol","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}],"usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12,"input_tokens_details":{"cached_tokens":4}}}`)
+	got, err := ResponseFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", nil, nil, body)
+	if err != nil {
+		t.Fatalf("ResponseFromEndpoint() error = %v", err)
+	}
+	if gjson.GetBytes(got, "choices.0.finish_reason").String() != "tool_calls" ||
+		gjson.GetBytes(got, "choices.0.message.tool_calls.0.function.name").String() != "lookup" ||
+		gjson.GetBytes(got, "choices.0.message.tool_calls.0.id").String() != "call_1" {
+		t.Fatalf("tool call not carried: %s", got)
+	}
+	if gjson.GetBytes(got, "usage.prompt_tokens").Int() != 9 || gjson.GetBytes(got, "usage.completion_tokens").Int() != 3 ||
+		gjson.GetBytes(got, "usage.prompt_tokens_details.cached_tokens").Int() != 4 {
+		t.Fatalf("usage not carried: %s", got)
+	}
+}

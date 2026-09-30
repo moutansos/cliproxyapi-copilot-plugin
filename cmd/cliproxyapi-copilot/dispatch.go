@@ -183,8 +183,8 @@ func pluginRegistration() registration {
 			AuthProvider:          true,
 			Executor:              true,
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
-			ExecutorInputFormats:  []string{"openai-response", "claude"},
-			ExecutorOutputFormats: []string{"openai-response", "claude"},
+			ExecutorInputFormats:  []string{"openai-response", "claude", "openai"},
+			ExecutorOutputFormats: []string{"openai-response", "claude", "openai"},
 		},
 	}
 }

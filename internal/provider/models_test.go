@@ -129,3 +129,45 @@ func TestNormalizeModelPrefixes(t *testing.T) {
 		t.Fatalf("normalized prefixes = %#v", got)
 	}
 }
+
+func TestSelectEndpointForOpenAIChatClient(t *testing.T) {
+	t.Parallel()
+
+	all := []string{"/chat/completions", "/responses", "/v1/messages"}
+	tests := []struct {
+		name  string
+		model upstreamModel
+		want  string
+	}{
+		{"claude model goes straight to chat", upstreamModel{ID: "claude-opus-5.5", Vendor: "Anthropic", SupportedEndpoints: all}, translate.EndpointChatCompletions},
+		{"gpt model goes straight to chat", upstreamModel{ID: "gpt-5-mini", SupportedEndpoints: []string{"/chat/completions", "/responses"}}, translate.EndpointChatCompletions},
+		{"responses-only model falls back to responses", upstreamModel{ID: "gpt-6-astra", SupportedEndpoints: []string{"/responses"}}, translate.EndpointResponses},
+		{"sol stays on responses", upstreamModel{ID: "gpt-5.6-sol", SupportedEndpoints: all}, translate.EndpointResponses},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := selectEndpointFor(test.model, "openai")
+			if err != nil || got != test.want {
+				t.Fatalf("selectEndpointFor() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	if got, _ := selectEndpointFor(upstreamModel{ID: "claude-opus-5.5", Vendor: "Anthropic", SupportedEndpoints: all}, "claude"); got != translate.EndpointMessages {
+		t.Fatalf("claude client on a Claude model = %q, want %q", got, translate.EndpointMessages)
+	}
+}
+
+func TestNormalizeRequestFormatAcceptsOpenAIChat(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"openai", "OpenAI", "chat", "chat-completions"} {
+		if got := normalizeRequestFormat(value); got != "openai" {
+			t.Fatalf("normalizeRequestFormat(%q) = %q, want openai", value, got)
+		}
+	}
+	if got := normalizeRequestFormat("gemini"); got != "" {
+		t.Fatalf("normalizeRequestFormat(gemini) = %q, want unsupported", got)
+	}
+}
