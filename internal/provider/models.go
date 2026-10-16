@@ -110,7 +110,7 @@ func (s *Service) models(ctx context.Context, callbackID, authID string, storage
 	resp, errDo := s.host.Do(ctx, callbackID, transport.Request{
 		Method:  http.MethodGet,
 		URL:     token.APIBaseURL + "/models",
-		Headers: copilotHeaders(token.Token, false),
+		Headers: copilotHeaders(token.Token, false, copilotInteractionContext{ID: "model-discovery", Type: "conversation-background", Initiator: "agent"}),
 	})
 	if errDo != nil {
 		return nil, copilotTokenEntry{}, fmt.Errorf("discover Copilot models: %w", errDo)
@@ -124,7 +124,7 @@ func (s *Service) models(ctx context.Context, callbackID, authID string, storage
 		resp, errDo = s.host.Do(ctx, callbackID, transport.Request{
 			Method:  http.MethodGet,
 			URL:     token.APIBaseURL + "/models",
-			Headers: copilotHeaders(token.Token, false),
+			Headers: copilotHeaders(token.Token, false, copilotInteractionContext{ID: "model-discovery", Type: "conversation-background", Initiator: "agent"}),
 		})
 		if errDo != nil {
 			return nil, copilotTokenEntry{}, fmt.Errorf("discover Copilot models after token refresh: %w", errDo)
